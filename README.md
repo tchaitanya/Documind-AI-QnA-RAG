@@ -275,31 +275,7 @@ This is a capstone project. For questions or feedback, please contact the develo
 
 **DocuMind AI** - AI-powered document intelligence 🤖
 
-The application uses LangChain's `initialize_agent` with a `DocumentRetriever` tool:
-
-```python
-tools = [
-    Tool(
-        name="DocumentRetriever",
-        func=lambda q: retriever.get_relevant_documents(q),
-        description="Retrieve relevant context from uploaded documents"
-    )
-]
-
-agent = initialize_agent(
-    tools=tools,
-    llm=llm,
-    agent=AgentType.CHAT_CONVERSATIONAL_REACT_DESCRIPTION,
-    verbose=True,
-    memory=memory
-)
-```
-
-The agent:
-- Reasons about user queries
-- Decides when to use the document retriever tool
-- Synthesizes answers from retrieved context
-- Maintains conversation history with memory
+Current implementation: a FastAPI-based RAG pipeline that retrieves top-k chunks from Azure AI Search, formats a prompt, and calls Azure OpenAI (GPT-4o). It does not use `initialize_agent`; responses are produced directly via the LLM with retrieved context.
 
 ## API Endpoints
 
