@@ -51,13 +51,13 @@ This document provides an in-depth explanation of the backend and frontend workf
 │  └─────────────────────────────────────────────────────────┘    │
 │                                                                   │
 │  ┌─────────────────────────────────────────────────────────┐    │
-│  │                  RAG Pipeline                            │    │
-│  │  1. Document Loading (PyPDF, Unstructured)              │    │
+│  │                  RAG Pipeline (rag_pipeline.py)          │    │
+│  │  1. Document Loading (PyPDF, simple text loading)       │    │
 │  │  2. Text Splitting (RecursiveCharacterTextSplitter)     │    │
 │  │  3. Embedding Generation (Azure OpenAI)                 │    │
 │  │  4. Hybrid Search (Azure AI Search)                     │    │
 │  │  5. Response Generation (GPT-4o)                        │    │
-│  │  6. Grounding Validation                                │    │
+│  │  6. Grounding Evaluation (Azure AI Evaluation 0-5)      │    │
 │  └─────────────────────────────────────────────────────────┘    │
 └───────────────┬──────────────┬──────────────┬───────────────────┘
                 │              │              │
@@ -75,9 +75,50 @@ This document provides an in-depth explanation of the backend and frontend workf
 
 ---
 
-## Backend Workflow
+## Modular Architecture
+
+### Backend Components
+
+The backend is organized into three main modules:
+
+**1. `main.py` - FastAPI Endpoints and Orchestration**
+- Defines all REST API endpoints
+- Handles CORS configuration
+- Initializes dependencies (blob manager, document processor, RAG pipeline)
+- Routes requests to appropriate modules
+
+**2. `rag_pipeline.py` - RAG Pipeline Class**
+- Encapsulates the entire RAG workflow
+- Manages Azure OpenAI clients (chat, embeddings)
+- Handles vector store operations
+- Implements grounding evaluation
+- Methods:
+  - `chat()` - Complete RAG flow with grounding
+  - `stream_chat()` - Streaming responses
+  - `_search()` - Hybrid search with fallback
+  - `_calculate_grounding_score()` - Azure AI Evaluation or heuristics
+  - `_build_context()` - Format retrieved chunks
+  - `_dedupe_sources()` - Merge chunks by source
+
+**3. `document_utils.py` - Document Processing Utilities**
+- `AzureBlobDocumentManager` - Blob storage operations
+  - Upload, download, list, delete files
+- `DocumentProcessor` - Document loading and chunking
+  - Multi-format support (PDF, TXT, MD, DOCX)
+  - RecursiveCharacterTextSplitter integration
+  - Metadata management
+
+**Benefits of Modular Architecture:**
+- **Separation of Concerns**: Each module has a single responsibility
+- **Testability**: Easy to unit test individual components
+- **Reusability**: RAGPipeline can be used in different contexts
+- **Maintainability**: Changes to one component don't affect others
+- **Scalability**: Easy to add new document types or evaluation methods
+
+---
 
 ### 1. Application Initialization
+
 
 **File:** `backend/main.py`
 
@@ -89,13 +130,15 @@ This document provides an in-depth explanation of the backend and frontend workf
 
 **Startup Sequence:**
 1. Load environment variables (`.env` file)
-2. Initialize Azure clients:
-   - `BlobServiceClient` for Azure Blob Storage
-  - `AzureChatOpenAI` for GPT-4o chat completions
-  - `AzureOpenAIEmbeddings` for text embeddings
+2. Initialize Azure Blob Storage and Document Processor:
+   - `AzureBlobDocumentManager` for blob operations
+   - `DocumentProcessor` for chunking documents
+3. Initialize RAG Pipeline (`RAGPipeline` class):
+   - `AzureChatOpenAI` for GPT-4o chat completions
+   - `AzureOpenAIEmbeddings` for text-embedding-3-large
    - `AzureSearch` vector store for hybrid search
-3. Load external prompt template from `prompt_instructions.txt`
-4. Initialize optional observability (disabled if imports fail)
+   - `GroundednessEvaluator` for grounding scores (0-5 scale)
+4. Load external prompt template from `prompt_instructions.txt`
 5. Start FastAPI server on `127.0.0.1:8000`
 
 **Key Configuration:**
@@ -175,7 +218,8 @@ User clicks "Process All" → Frontend iterates files → POST /process (per fil
                                                               ↓
                                         Load document based on file extension:
                                           • .pdf → PyPDFLoader
-                                          • .docx/.txt/.md → UnstructuredFileLoader
+                                          • .txt/.md → Simple text loading (direct file read)
+                                          • .docx → UnstructuredFileLoader
                                                               ↓
                                         Split text into chunks:
                                           • RecursiveCharacterTextSplitter
@@ -206,21 +250,26 @@ async def process_blob(req: ProcessRequest):
     # 2. Load document based on file type
     if req.blob_name.endswith(".pdf"):
         loader = PyPDFLoader(local_path)
-    elif req.blob_name.endswith((".docx", ".txt", ".md")):
-        # NO mode="elements" - keeps markdown sections together
+        docs = loader.load()
+    elif req.blob_name.endswith((".txt", ".md")):
+        # Simple text loading - no external dependencies needed
+        with open(local_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        docs = [Document(page_content=content, metadata={"source": req.blob_name})]
+    elif req.blob_name.endswith(".docx"):
         loader = UnstructuredFileLoader(local_path)
-    
-    # 3. Load and chunk documents
-    docs = loader.load()
+        docs = loader.load()
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=2000,        # Larger chunks preserve context
         chunk_overlap=200       # Overlap prevents splitting related content
     )
     chunks = text_splitter.split_documents(docs)
     
-    # 4. Add metadata to chunks
-    for chunk in chunks:
+    # 4. Add metadata to chunks (including page number)
+    for i, chunk in enumerate(chunks):
         chunk.metadata["source"] = req.blob_name
+        if "page" not in chunk.metadata:
+            chunk.metadata["page"] = i  # Required by Azure AI Search index
     
     # 5. Index to Azure AI Search with embeddings
     vectorstore = get_vectorstore()  # AzureSearch instance
@@ -240,12 +289,13 @@ async def process_blob(req: ProcessRequest):
 1. **Why 2000-char chunks?**
    - Smaller chunks (1200) were splitting related content
    - Example: Vacation policy header separated from actual days
-   - 2000 chars keeps complete policy sections together
+2. **Why simple text loading for .txt and .md?**
+   - UnstructuredFileLoader requires additional dependencies (unstructured package)
+   - Simple text reading is faster and more reliable
+   - Markdown and text files are already clean and structured
+   - RecursiveCharacterTextSplitter handles chunking effectively
 
-2. **Why remove mode="elements"?**
-   - UnstructuredFileLoader with mode="elements" splits by markdown elements
-   - Created too many small, disconnected chunks
-   - Without mode, entire sections stay together
+3. **Why RecursiveCharacterTextSplitter?**gether
 
 3. **Why RecursiveCharacterTextSplitter?**
    - Splits on paragraph boundaries first, then sentences
@@ -269,7 +319,7 @@ print(f"Preview of first chunk:\n{chunks[0].page_content[:200]}")
 ```
 User types question → POST /chat with query and top_k
                               ↓
-                    Hybrid search in Azure AI Search
+                    Hybrid search in Azure AI Search (via RAGPipeline)
                       • Vector similarity (semantic)
                       • Keyword matching (lexical)
                       • Returns top 5 chunks
@@ -284,90 +334,92 @@ User types question → POST /chat with query and top_k
                       • Generate answer using context
                       • No temperature parameter (default=1)
                               ↓
-                    Grounding validation
-                      • Check if answer contains "don't have"
-                      • Classify as grounded/ungrounded
+                    Grounding evaluation (Azure AI Evaluation)
+                      • GroundednessEvaluator analyzes answer vs context
+                      • Returns score 0-5 (5 = fully grounded)
+                      • Falls back to heuristics if Azure eval fails
                               ↓
                     Build reasoning log
-                      • Phase 1: Retrieval (5 docs found)
-                      • Phase 2: Generation (LLM processing)
-                      • Phase 3: Grounding (validation result)
+                      • Phase 1: Retrieval (5 docs found, duration)
+                      • Phase 2: Generation (model, context size, duration)
+                      • Phase 3: Grounding (score X.X/5.0, status)
+                      • Phase 4: Total (end-to-end time)
                               ↓
                     Return response with:
                       • answer: Generated text
                       • sources: Retrieved chunks
-                      • reasoning_log: Process steps
-                      • agentic: Grounding status
+                      • grounding_score: 0-5 scale
+                      • reasoning_log: Process steps with timings
+                      • agentic: true if score >= 3.0
 ```
 
-**Code Flow:**
+**Code Flow (Modular Architecture):**
 ```python
 @app.post("/chat")
-async def chat_endpoint(req: ChatRequest):
+def chat(req: ChatRequest):
+    # Delegate to RAG pipeline class
+    return rag_pipeline.chat(req.query, req.top_k)
+
+# In RAGPipeline class (rag_pipeline.py):
+def chat(self, query: str, top_k: int):
     # 1. Retrieve relevant documents (hybrid search)
-    vectorstore = get_vectorstore()
-    try:
-        docs = vectorstore.similarity_search(
-            req.query,
-            k=req.top_k,
-            search_type="hybrid"  # Vector + keyword
-        )
-    except Exception:
-        # Fallback to default search if hybrid fails
-        docs = vectorstore.similarity_search(req.query, k=req.top_k)
+    start = time.time()
+    docs = self._search(query, top_k)
+    search_time = time.time() - start
     
     # 2. Build context from retrieved documents
-    context = "\n\n".join([
-        f"Document: {doc.metadata.get('source', 'unknown')}\n{doc.page_content}"
-        for doc in docs
-    ])
+    context = self._build_context(docs)
     
-    # 3. Load and format prompt
-    prompt = PROMPT_TEMPLATE.format(
+    # 3. Format prompt with context and question
+    prompt_text = self.prompt_template.format(
         context=context,
-        question=req.query
+        question=query
     )
     
     # 4. Generate answer using GPT-4o
-    llm = get_llm()  # AzureChatOpenAI instance
-    answer = llm.invoke(prompt).content
+    llm_start = time.time()
+    answer = self.llm.invoke(prompt_text).content
+    llm_time = time.time() - llm_start
     
-    # 5. Grounding validation
-    grounded = not any(phrase in answer.lower() for phrase in [
-        "don't have", "not provided", "information is not available"
-    ])
+    # 5. Deduplicate sources by filename
+    sources = self._dedupe_sources(docs)
     
-    # 6. Build reasoning log
+    # 6. Calculate grounding score (0-5 scale)
+    grounding_score = self._calculate_grounding_score(answer, context)
+    is_grounded = grounding_score >= 3.0
+    
+    # 7. Build reasoning log with timings
+    total_time = time.time() - start
     reasoning_log = [
         {
             "phase": "Retrieval",
-            "details": f"Retrieved {len(docs)} relevant documents using hybrid search",
-            "timestamp": datetime.now().isoformat()
+            "details": f"Retrieved {len(docs)} documents using hybrid search",
+            "duration": f"{search_time:.2f}s"
         },
         {
             "phase": "Generation",
-            "details": f"Generated answer using GPT-4o with {len(context)} chars of context",
-            "timestamp": datetime.now().isoformat()
+            "details": f"Model: {self.chat_deployment} | Context size: {len(context)} chars",
+            "duration": f"{llm_time:.2f}s"
         },
         {
             "phase": "Grounding",
-            "details": f"Answer is {'grounded in documents' if grounded else 'missing information'}",
-            "timestamp": datetime.now().isoformat()
+            "details": f"Score: {grounding_score:.1f}/5.0 | {'Fully grounded' if is_grounded else 'Partially grounded'}",
+            "duration": "N/A"
+        },
+        {
+            "phase": "Total",
+            "details": "End-to-end response time",
+            "duration": f"{total_time:.2f}s"
         }
     ]
     
-    # 7. Return complete response
+    # 8. Return complete response
     return {
         "answer": answer,
-        "sources": [
-            {
-                "source": doc.metadata.get("source", "unknown"),
-                "content": doc.page_content
-            }
-            for doc in docs
-        ],
-        "reasoning_log": reasoning_log,
-        "agentic": grounded
+        "sources": sources,
+        "agentic": is_grounded,
+        "grounding_score": grounding_score,
+        "reasoning_log": reasoning_log
     }
 ```
 
@@ -389,12 +441,35 @@ Azure AI Search hybrid search combines:
    - Results ranked by combined relevance
    - Best of both worlds
 
-**Grounding Validation:**
+**Grounding Evaluation:**
 
-Checks if the answer indicates missing information:
-- "don't have this information"
-- "not provided in the documents"
-- "information is not available"
+The system uses **Azure AI Evaluation** with the `GroundednessEvaluator` to score how well answers are grounded in the retrieved context:
+
+**Primary Method (Azure AI Evaluation):**
+- Uses an LLM to semantically analyze the answer against the context
+- Returns a score from 0-5 where:
+  - **5**: Fully grounded - all information comes from context
+  - **4**: Mostly grounded - minor inferences but based on context
+  - **3**: Partially grounded - some context-based, some missing
+  - **2**: Minimally grounded - little connection to context
+  - **1**: Not grounded - answer doesn't align with context
+  - **0**: Completely ungrounded
+- Score >= 3.0 is considered "grounded"
+
+**Fallback Heuristics (if Azure eval fails):**
+```python
+# Remove ungrounded phrases and measure meaningful content
+if meaningful_content > 200 chars and no ungrounded phrases:
+    return 5.0  # Fully grounded
+elif meaningful_content > 200 chars:
+    return 3.5  # Substantial but mentions missing info
+elif meaningful_content > 100 chars and no ungrounded phrases:
+    return 4.0  # Good content, fully grounded
+elif meaningful_content > 100 chars:
+    return 2.5  # Some content but partially ungrounded
+else:
+    return 1.0-2.0  # Minimal content
+```
 
 If found → `agentic: false` (ungrounded)  
 If not found → `agentic: true` (grounded)

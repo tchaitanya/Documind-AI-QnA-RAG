@@ -1,5 +1,6 @@
 import os
 import time
+import traceback
 from typing import List, Optional
 
 from fastapi import FastAPI, UploadFile, File, Query, Request
@@ -16,10 +17,14 @@ load_dotenv()
 
 app = FastAPI(title="Agentic RAG Backend")
 
-# CORS
+# CORS - Allow both common frontend ports
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[os.getenv("CORS_ORIGIN", "http://localhost:5173")],
+    allow_origins=[
+        os.getenv("CORS_ORIGIN", "http://localhost:5173"),
+        "http://localhost:5174",
+        "http://localhost:5173"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -132,16 +137,27 @@ async def upload_file(request: Request, files: List[UploadFile] = File(...)):
 def process_blob(request: Request, blob: str = Query(...)):
     """Download a blob, chunk it, and index the chunks into Azure AI Search."""
     try:
+        print(f"\n[PROCESS] Starting processing for: {blob}")
+        
         # Process file using document processor
         print(f"[PROCESS] Loading and chunking {blob}...")
         chunks, chunk_count = doc_processor.process_file(blob_manager, blob)
         print(f"[PROCESS] Created {chunk_count} chunks")
+        
+        if chunk_count == 0:
+            print(f"[PROCESS WARNING] No chunks created for {blob}")
+            return {
+                "blob": blob,
+                "chunks": 0,
+                "chunks_indexed": 0,
+                "message": "No chunks created - file may be empty or unsupported format"
+            }
 
         # Index into Azure AI Search
-        print(f"[PROCESS] Indexing into Azure AI Search (hybrid mode)...")
+        print(f"[PROCESS] Indexing {chunk_count} chunks into Azure AI Search...")
         vectorstore = rag_pipeline.get_vectorstore()
         vectorstore.add_documents(chunks)
-        print(f"[PROCESS] Successfully indexed {chunk_count} chunks")
+        print(f"[PROCESS] ✓ Successfully indexed {chunk_count} chunks for {blob}\n")
 
         return {
             "blob": blob,
@@ -151,8 +167,11 @@ def process_blob(request: Request, blob: str = Query(...)):
         }
     
     except Exception as e:
-        print(f"[PROCESS ERROR] Failed to process {blob}: {str(e)}")
-        return {"error": f"Network Error: {str(e)}", "blob": blob, "chunks": 0}
+        error_trace = traceback.format_exc()
+        print(f"[PROCESS ERROR] Failed to process {blob}")
+        print(f"Error: {str(e)}")
+        print(f"Traceback:\n{error_trace}")
+        return {"error": str(e), "blob": blob, "chunks": 0}
 
 @app.post("/chat")
 def chat(req: ChatRequest):

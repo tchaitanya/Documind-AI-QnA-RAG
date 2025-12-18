@@ -119,13 +119,18 @@ class DocumentProcessor:
         """
         if file_name.endswith(".pdf"):
             loader = PyPDFLoader(file_path)
-        elif file_name.endswith((".docx", ".txt", ".md")):
-            # No mode="elements" for markdown to keep sections together
+            return loader.load()
+        elif file_name.endswith((".txt", ".md")):
+            # Simple text loading for .txt and .md files
+            with open(file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            return [Document(page_content=content, metadata={"source": file_name})]
+        elif file_name.endswith(".docx"):
+            # Use UnstructuredFileLoader only for .docx
             loader = UnstructuredFileLoader(file_path)
+            return loader.load()
         else:
             raise ValueError(f"Unsupported file type: {file_name}")
-        
-        return loader.load()
     
     def chunk_documents(self, documents: List[Document]) -> List[Document]:
         """
@@ -170,13 +175,18 @@ class DocumentProcessor:
         try:
             # Load document
             documents = self.load_document(local_path, file_name)
+            print(f"[DEBUG] Loaded {len(documents)} raw documents from {file_name}")
             
-            # Add source metadata
-            for doc in documents:
+            # Add source metadata and ensure page number exists
+            for i, doc in enumerate(documents):
                 doc.metadata["source"] = file_name
+                # Ensure page metadata exists (required by Azure AI Search index)
+                if "page" not in doc.metadata:
+                    doc.metadata["page"] = i
             
             # Chunk documents
             chunks = self.chunk_documents(documents)
+            print(f"[DEBUG] Created {len(chunks)} chunks from {file_name}")
             
             return chunks, len(chunks)
         

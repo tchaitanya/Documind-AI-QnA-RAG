@@ -6,6 +6,13 @@ from langchain_community.vectorstores import AzureSearch as AzureSearchVS
 from langchain_openai import AzureOpenAIEmbeddings, AzureChatOpenAI
 from langchain_core.prompts import PromptTemplate
 
+try:
+    from azure.ai.evaluation import GroundednessEvaluator
+    GROUNDING_EVALUATOR_AVAILABLE = True
+except ImportError:
+    GROUNDING_EVALUATOR_AVAILABLE = False
+    print("Warning: azure-ai-evaluation not installed. Grounding scores will use basic heuristics.")
+
 
 class RAGPipeline:
     def __init__(
@@ -50,6 +57,22 @@ class RAGPipeline:
         )
 
         self._vectorstore = None
+        
+        # Initialize grounding evaluator if available
+        self._grounding_evaluator = None
+        if GROUNDING_EVALUATOR_AVAILABLE:
+            try:
+                self._grounding_evaluator = GroundednessEvaluator(
+                    model_config={
+                        "azure_endpoint": self.azure_openai_endpoint,
+                        "api_key": self.azure_openai_api_key,
+                        "azure_deployment": self.chat_deployment,
+                        "api_version": self.api_version,
+                    }
+                )
+                print("✅ Grounding evaluator initialized")
+            except Exception as e:
+                print(f"Warning: Could not initialize grounding evaluator: {e}")
 
     def get_vectorstore(self):
         """Return (or create) the Azure AI Search vector store using the embedding client."""
@@ -91,8 +114,67 @@ class RAGPipeline:
             else:
                 sources_dict[source_name] += f"\n\n---\n\n{d.page_content}"
         return [{"source": name, "content": content} for name, content in sources_dict.items()]
+    
+    def _calculate_grounding_score(self, answer: str, context: str) -> float:
+        """
+        Calculate grounding score (0-5 scale) using Azure AI Evaluation or fallback heuristics.
+        
+        Args:
+            answer: The generated answer
+            context: The retrieved context used to generate the answer
+            
+        Returns:
+            Score from 0-5 where 5 is fully grounded
+        """
+        if self._grounding_evaluator:
+            try:
+                # Use Azure AI Evaluation grounding evaluator
+                result = self._grounding_evaluator(
+                    answer=answer,
+                    context=context
+                )
+                # The evaluator returns a score, typically 1-5
+                return result.get("groundedness", 0)
+            except Exception as e:
+                print(f"Warning: Grounding evaluation failed, using fallback: {e}")
+        
+        # Fallback heuristic scoring (0-5 scale)
+        ungrounded_phrases = (
+            "i don't have",
+            "not in the",
+            "no information",
+            "cannot find",
+            "not available",
+            "not mentioned",
+            "not provided",
+            "don't have this information",
+        )
+        
+        answer_lower = answer.lower()
+        has_ungrounded_phrase = any(p in answer_lower for p in ungrounded_phrases)
+        
+        # Remove ungrounded phrases and check meaningful content
+        answer_without_ungrounded = answer_lower
+        for phrase in ungrounded_phrases:
+            answer_without_ungrounded = answer_without_ungrounded.replace(phrase, "")
+        
+        meaningful_content_length = len(answer_without_ungrounded.strip())
+        
+        if meaningful_content_length > 200 and not has_ungrounded_phrase:
+            return 5.0  # Fully grounded with substantial content
+        elif meaningful_content_length > 200 and has_ungrounded_phrase:
+            return 3.5  # Substantial content but mentions missing info
+        elif meaningful_content_length > 100 and not has_ungrounded_phrase:
+            return 4.0  # Good content, fully grounded
+        elif meaningful_content_length > 100:
+            return 2.5  # Some content but partially ungrounded
+        elif meaningful_content_length > 50:
+            return 2.0  # Minimal content
+        else:
+            return 1.0  # Very little or no grounded content
 
     def chat(self, query: str, top_k: int):
+        """Retrieve, build context, generate an answer, and return answer + sources + reasoning."""
         start = time.time()
         docs = self._search(query, top_k)
         search_time = time.time() - start
@@ -105,16 +187,12 @@ class RAGPipeline:
         llm_time = time.time() - llm_start
 
         sources = self._dedupe_sources(docs)
-        ungrounded_phrases = (
-            "i don't have",
-            "not in the",
-            "no information",
-            "cannot find",
-            "not available",
-            "not mentioned",
-            "not provided",
-        )
-        is_grounded = not any(p in answer.lower() for p in ungrounded_phrases)
+        
+        # Calculate grounding score using Azure AI Evaluation or fallback heuristics
+        grounding_score = self._calculate_grounding_score(answer, context)
+        
+        # Determine if grounded (score >= 3 out of 5)
+        is_grounded = grounding_score >= 3.0
 
         total_time = time.time() - start
         reasoning_log = [
@@ -125,13 +203,12 @@ class RAGPipeline:
             },
             {
                 "phase": "Generation",
-                """Retrieve, build context, generate an answer, and return answer + sources + reasoning."""
                 "details": f"Model: {self.chat_deployment} | Context size: {len(context)} chars",
                 "duration": f"{llm_time:.2f}s",
             },
             {
                 "phase": "Grounding",
-                "details": f"Answer is {'grounded in documents' if is_grounded else 'missing information'}",
+                "details": f"Score: {grounding_score:.1f}/5.0 | {'Fully grounded' if is_grounded else 'Partially grounded'}",
                 "duration": "N/A",
             },
             {
@@ -145,6 +222,7 @@ class RAGPipeline:
             "answer": answer,
             "sources": sources,
             "agentic": is_grounded,
+            "grounding_score": grounding_score,
             "reasoning_log": reasoning_log,
         }
 

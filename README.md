@@ -41,6 +41,7 @@ See `TECHNICAL_DOCUMENTATION.md` for deeper architecture details.
 - Azure AI Search (Standard tier with hybrid search)
 - Azure Blob Storage (document management)
 - LangChain (langchain_openai, langchain_community, langchain_text_splitters)
+- Azure AI Evaluation (GroundednessEvaluator for 0-5 grounding scores)
 
 **Frontend:**
 - React 18.3.1 with TypeScript
@@ -52,8 +53,9 @@ See `TECHNICAL_DOCUMENTATION.md` for deeper architecture details.
 🤖 **AI-Powered Intelligence**
 - GPT-4o chat model from Azure AI Foundry
 - Hybrid search combining vector similarity and keyword matching
-- Grounding validation to ensure answers are based on retrieved documents
-- Detailed reasoning logs showing retrieval → generation → grounding phases
+- Azure AI Evaluation for grounding scores (0-5 scale)
+- Detailed reasoning logs showing retrieval → generation → grounding phases with scores
+- Modular RAG pipeline architecture for easy customization
 
 📄 **Document Processing**
 - Multi-file upload support (PDF, DOCX, TXT, Markdown)
@@ -151,19 +153,20 @@ Frontend will run on `http://localhost:5174`
 
 ### RAG Pipeline
 1. **Document Upload** → Azure Blob Storage
-2. **Processing** → PyPDFLoader/UnstructuredFileLoader → RecursiveCharacterTextSplitter
-3. **Indexing** → Azure OpenAI Embeddings → Azure AI Search
+2. **Processing** → PyPDFLoader (PDFs) / Simple text loading (.txt, .md) → RecursiveCharacterTextSplitter
+3. **Indexing** → Azure OpenAI Embeddings (text-embedding-3-large) → Azure AI Search
 4. **Query** → Hybrid Search (vector + keyword) → Top 5 chunks retrieved
 5. **Generation** → GPT-4o generates answer using retrieved context
-6. **Validation** → Grounding check ensures answer is context-based
-7. **Response** → Answer + Sources + Reasoning log returned to UI
+6. **Grounding Evaluation** → Azure AI Evaluation scores answer (0-5 scale)
+7. **Response** → Answer + Sources + Grounding Score + Reasoning log returned to UI
 
 ### Project Structure
 ```
 Documind-AI-QnA-RAG/
 ├── backend/
-│   ├── main.py                    # FastAPI RAG API
-│   ├── document_utils.py          # Loaders and chunking helpers
+│   ├── main.py                    # FastAPI endpoints and orchestration
+│   ├── rag_pipeline.py            # RAG pipeline with grounding evaluation
+│   ├── document_utils.py          # Document loaders and chunking helpers
 │   ├── index_setup.py             # Creates Azure AI Search index
 │   ├── prompt_instructions.txt    # System prompt template
 │   ├── requirements.txt           # Backend dependencies
