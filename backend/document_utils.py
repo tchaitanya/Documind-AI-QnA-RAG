@@ -1,6 +1,4 @@
-"""
-Document utilities for Azure Blob Storage operations and document processing.
-"""
+"""Document utilities for Azure Blob Storage operations and document processing."""
 
 import os
 from azure.storage.blob import BlobServiceClient, ContainerClient
@@ -11,7 +9,7 @@ from langchain_core.documents import Document
 
 
 class AzureBlobDocumentManager:
-    """Manages document operations with Azure Blob Storage."""
+    """Manage uploads, downloads, and listings against a single blob container."""
     
     def __init__(self, connection_string: str, container_name: str):
         """
