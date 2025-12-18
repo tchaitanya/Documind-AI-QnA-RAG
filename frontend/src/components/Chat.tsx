@@ -87,7 +87,7 @@ export default function Chat() {
 
             {t.agentic !== undefined && t.role === 'assistant' && (
               <div className="badge">
-                {t.agentic ? 'Agentic RAG ✅' : 'Plain RAG 📄'}
+                {t.agentic ? 'Grounded answer ✅' : 'Ungrounded ⚠️'}
               </div>
             )}
 

@@ -28,7 +28,7 @@ export default function Process({ files }: { files: string[] }) {
 
   return (
     <div className="card" style={{ padding: '16px' }}>
-      <h3 style={{ fontSize: '16px', marginBottom: '8px' }}>Process and index</h3>
+      <h3 style={{ fontSize: '16px', marginBottom: '8px' }}>Index documents</h3>
       <p className="badge" style={{ fontSize: '11px', padding: '4px 10px' }}>Azure AI Search • {files.length} file(s) ready</p>
       {files.length > 0 && (
         <div style={{ marginBottom: 8, fontSize: 12, color: 'var(--muted)' }}>
@@ -42,7 +42,7 @@ export default function Process({ files }: { files: string[] }) {
           disabled={files.length === 0 || loading}
           onClick={processAll}
         >
-          Process All
+          Start indexing
         </button>
         <span style={{ fontSize: '12px' }}>{status}</span>
       </div>

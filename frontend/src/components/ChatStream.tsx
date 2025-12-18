@@ -283,7 +283,7 @@ export default function ChatStream() {
                 fontSize: '12px',
                 fontWeight: 600
               }}>
-                {t.agentic ? '✅ Agentic RAG' : '📄 Plain RAG'}
+                {t.agentic ? '✅ Grounded answer' : '⚠️ Ungrounded'}
               </div>
             )}
 
